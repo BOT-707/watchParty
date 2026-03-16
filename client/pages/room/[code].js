@@ -111,20 +111,39 @@ export default function RoomPage() {
       socket.emit('join-room', { roomCode });
     };
 
-    const onRoomJoined = ({ socketId, isHost: host, userCount }) => {
+    // const onRoomJoined = ({ socketId, isHost: host, userCount }) => {
+    //   setMySocketId(socketId);
+    //   setIsHost(host);
+    //   if (userCount === 2) {
+    //     setPartnerConnected(true);
+    //     partnerConnectedRef.current = true;
+    //     setTimeout(() => socket.emit('request-sync', { roomCode }), 500);
+    //   }
+    // };
+
+    const onRoomJoined = ({ socketId, isHost: host, role, userCount: count }) => {
       setMySocketId(socketId);
       setIsHost(host);
-      if (userCount === 2) {
+      setMyRole(role);
+      setUserCount(count);
+      if (count === 2) {
         setPartnerConnected(true);
-        partnerConnectedRef.current = true;
+         partnerConnectedRef.current = true;
         setTimeout(() => socket.emit('request-sync', { roomCode }), 500);
-      }
-    };
+        }
+      };
 
-    const onUserJoined = ({ socketId }) => {
+    // const onUserJoined = ({ socketId }) => {
+    //   setPartnerConnected(true);
+    //   partnerConnectedRef.current = true;
+    //   setPartnerSocketId(socketId);
+
+    const onUserJoined = ({ socketId, role }) => {
       setPartnerConnected(true);
       partnerConnectedRef.current = true;
       setPartnerSocketId(socketId);
+      setPartnerRole(role || '');
+      setUserCount(2);
 
       const currentMedia = mediaDataRef.current;
       if (currentMedia) {
@@ -141,11 +160,20 @@ export default function RoomPage() {
       }
     };
 
-    const onUserLeft = () => {
+    // const onUserLeft = () => {
+    //   setPartnerConnected(false);
+    //   partnerConnectedRef.current = false;
+    //   setPartnerSocketId('');
+    //   setPartnerBuffering(false);
+    // };
+
+    const onUserLeft = ({ userCount: count }) => {
       setPartnerConnected(false);
       partnerConnectedRef.current = false;
       setPartnerSocketId('');
+      setPartnerRole('');
       setPartnerBuffering(false);
+      setUserCount(count || 1);
     };
 
     const onPartnerBuffering = ({ buffering }) => setPartnerBuffering(buffering);
@@ -454,6 +482,9 @@ export default function RoomPage() {
                   mySocketId={mySocketId} partnerConnected={partnerConnected} partnerSocketId={partnerSocketId}
                   isBuffering={isBuffering} partnerBuffering={partnerBuffering} latency={latency}
                   roomCode={roomCode} onCopyCode={handleCopyCode} copied={copied}
+                    myRole={myRole}
+                    partnerRole={partnerRole}
+                    userCount={userCount}
                 />
               </div>
             )}
