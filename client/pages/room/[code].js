@@ -18,10 +18,18 @@ export default function RoomPage() {
   const { connect, disconnect, isConnected, latency } = useSocket();
 
   // ─── Core room state ────────────────────────────────────────────
+  // const [mySocketId, setMySocketId] = useState('');
+  // const [isHost, setIsHost] = useState(false);
+  // const [partnerConnected, setPartnerConnected] = useState(false);
+  // const [partnerSocketId, setPartnerSocketId] = useState('');
+
   const [mySocketId, setMySocketId] = useState('');
   const [isHost, setIsHost] = useState(false);
+  const [myRole, setMyRole] = useState('');
+  const [partnerRole, setPartnerRole] = useState('');
   const [partnerConnected, setPartnerConnected] = useState(false);
   const [partnerSocketId, setPartnerSocketId] = useState('');
+  const [userCount, setUserCount] = useState(1);
 
   // ─── Media state ────────────────────────────────────────────────
   const [mediaData, setMediaData] = useState(null);
