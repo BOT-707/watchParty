@@ -1,5 +1,8 @@
 export default function UserStatus({
   mySocketId,
+  myRole,
+  partnerRole,
+  userCount,
   partnerConnected,
   partnerSocketId,
   isBuffering,
@@ -15,14 +18,12 @@ export default function UserStatus({
     if (ms < 150) return 'text-amber-400';
     return 'text-rose-400';
   };
-
   const getLatencyLabel = (ms) => {
     if (!ms) return '—';
     if (ms < 50) return 'Excellent';
     if (ms < 150) return 'Good';
     return 'Poor';
   };
-
   return (
     <div className="bg-surface border border-border rounded-xl overflow-hidden">
       {/* Room code */}
@@ -54,6 +55,7 @@ export default function UserStatus({
 
       {/* Users */}
       <div className="px-4 py-3 space-y-2.5">
+
         {/* Me */}
         <div className="flex items-center gap-3">
           <div className="relative flex-shrink-0">
@@ -65,8 +67,17 @@ export default function UserStatus({
             <div className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-surface" />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="text-sm font-display font-medium text-text-primary">You</span>
+              {myRole && (
+                <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+                  myRole === 'host'
+                    ? 'text-amber-400 bg-amber-500/10 border-amber-500/30'
+                    : 'text-cyan-400 bg-cyan-500/10 border-cyan-500/30'
+                }`}>
+                  {myRole}
+                </span>
+              )}
               <span className="text-xs text-emerald-400 font-mono">● Connected</span>
             </div>
             {mySocketId && (
@@ -102,10 +113,19 @@ export default function UserStatus({
             }`} />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className={`text-sm font-display font-medium ${partnerConnected ? 'text-text-primary' : 'text-text-muted'}`}>
-                Partner
+                {partnerRole ? partnerRole.charAt(0).toUpperCase() + partnerRole.slice(1) : 'Partner'}
               </span>
+              {partnerRole && (
+                <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+                  partnerRole === 'host'
+                    ? 'text-amber-400 bg-amber-500/10 border-amber-500/30'
+                    : 'text-cyan-400 bg-cyan-500/10 border-cyan-500/30'
+                }`}>
+                  {partnerRole}
+                </span>
+              )}
               <span className={`text-xs font-mono ${partnerConnected ? 'text-emerald-400' : 'text-text-muted'}`}>
                 {partnerConnected ? '● Connected' : '○ Waiting…'}
               </span>
@@ -131,7 +151,7 @@ export default function UserStatus({
       <div className="flex items-center gap-4 px-4 py-2.5 bg-abyss border-t border-border">
         <div className="flex items-center gap-1.5">
           <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          <span className="text-xs text-text-muted font-mono">Server</span>
+          <span className="text-xs text-text-muted font-mono">{userCount || 1}/2 users</span>
         </div>
         <div className="flex items-center gap-1.5">
           <svg className="w-3 h-3 text-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
