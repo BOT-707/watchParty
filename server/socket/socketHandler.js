@@ -12,359 +12,181 @@
 const Room = require('../models/Room');
 const { inMemoryRooms } = require('../controllers/roomController');
 
-// Track active socket rooms in memory for fast lookup
-const socketRoomMap = new Map(); // socketId -> roomCode
-const roomSocketsMap = new Map(); // roomCode -> Set<socketId>
+const roomState  = new Map();
+const socketMeta = new Map();
 
 const isMongoConnected = () => {
   const mongoose = require('mongoose');
   return mongoose.connection.readyState === 1;
 };
 
-const getRoomUsers = (roomCode) => {
-  return roomSocketsMap.get(roomCode) || new Set();
+const getActiveCount = (roomCode) => {
+  const r = roomState.get(roomCode);
+  if (!r) return 0;
+  return (r.host.socketId ? 1 : 0) + (r.partner.socketId ? 1 : 0);
 };
 
-const getOtherUser = (roomCode, mySocketId) => {
-  const users = getRoomUsers(roomCode);
-  for (const id of users) {
-    if (id !== mySocketId) return id;
-  }
+const getOtherSocket = (roomCode, myId) => {
+  const r = roomState.get(roomCode);
+  if (!r) return null;
+  if (r.host.socketId    === myId) return r.partner.socketId;
+  if (r.partner.socketId === myId) return r.host.socketId;
   return null;
 };
 
-const getRoomUserCount = (roomCode) => {
-  return getRoomUsers(roomCode).size;
+const availableRole = (roomCode) => {
+  const r = roomState.get(roomCode);
+  if (!r)                  return 'host';
+  if (!r.host.socketId)    return 'host';
+  if (!r.partner.socketId) return 'partner';
+  return null;
 };
 
 module.exports = (io) => {
-  // Inactivity timeout: disconnect users idle > 30 mins
-  const INACTIVITY_TIMEOUT = 30 * 60 * 1000;
-  const inactivityTimers = new Map();
+  const IDLE_TIMEOUT = 30 * 60 * 1000;
+  const idleTimers   = new Map();
 
-  const resetInactivityTimer = (socketId) => {
-    if (inactivityTimers.has(socketId)) {
-      clearTimeout(inactivityTimers.get(socketId));
-    }
-    const timer = setTimeout(() => {
-      const socket = io.sockets.sockets.get(socketId);
-      if (socket) {
-        socket.emit('kicked', { reason: 'Inactivity timeout' });
-        socket.disconnect(true);
-      }
-    }, INACTIVITY_TIMEOUT);
-    inactivityTimers.set(socketId, timer);
+  const resetIdle = (id) => {
+    if (idleTimers.has(id)) clearTimeout(idleTimers.get(id));
+    idleTimers.set(id, setTimeout(() => {
+      const s = io.sockets.sockets.get(id);
+      if (s) { s.emit('kicked', { reason: 'Inactivity timeout' }); s.disconnect(true); }
+    }, IDLE_TIMEOUT));
   };
 
   const cleanupSocket = async (socketId) => {
-    clearTimeout(inactivityTimers.get(socketId));
-    inactivityTimers.delete(socketId);
-
-    const roomCode = socketRoomMap.get(socketId);
-    if (!roomCode) return;
-
-    socketRoomMap.delete(socketId);
-
-    const users = roomSocketsMap.get(roomCode);
-    if (users) {
-      users.delete(socketId);
-      if (users.size === 0) {
-        roomSocketsMap.delete(roomCode);
-        // Clean up room from DB/memory
-        if (isMongoConnected()) {
-          try {
-            await Room.findOneAndUpdate(
-              { code: roomCode },
-              { isActive: false }
-            );
-          } catch (e) { /* ignore */ }
-        } else {
-          inMemoryRooms.delete(roomCode);
-        }
+    clearTimeout(idleTimers.get(socketId));
+    idleTimers.delete(socketId);
+    const meta = socketMeta.get(socketId);
+    if (!meta) return;
+    const { roomCode, role } = meta;
+    socketMeta.delete(socketId);
+    const r = roomState.get(roomCode);
+    if (!r) return;
+    if (role === 'host')    r.host.socketId    = null;
+    if (role === 'partner') r.partner.socketId = null;
+    const remaining = getActiveCount(roomCode);
+    io.to(roomCode).emit('user-left', { socketId, role, userCount: remaining, timestamp: Date.now() });
+    if (remaining === 0) {
+      roomState.delete(roomCode);
+      if (isMongoConnected()) {
+        try { await Room.findOneAndUpdate({ code: roomCode }, { isActive: false }); } catch (_) {}
+      } else {
+        inMemoryRooms.delete(roomCode);
       }
     }
-
-    // Notify remaining users
-    io.to(roomCode).emit('user-left', {
-      socketId,
-      userCount: getRoomUserCount(roomCode),
-      timestamp: Date.now(),
-    });
   };
 
   io.on('connection', (socket) => {
-    console.log(`🔌 Client connected: ${socket.id}`);
-    resetInactivityTimer(socket.id);
-
-    // ─── ROOM EVENTS ────────────────────────────────────────
+    resetIdle(socket.id);
 
     socket.on('join-room', async ({ roomCode }) => {
       try {
-        if (!roomCode || roomCode.length !== 5) {
+        if (!roomCode || roomCode.length !== 5)
           return socket.emit('error', { message: 'Invalid room code' });
+        const prev = socketMeta.get(socket.id);
+        if (prev && prev.roomCode !== roomCode) await cleanupSocket(socket.id);
+        const role = availableRole(roomCode);
+        if (!role) return socket.emit('error', { message: 'Room is full (max 2 users)' });
+        if (!roomState.has(roomCode)) {
+          roomState.set(roomCode, { host: { socketId: null }, partner: { socketId: null }, createdAt: Date.now() });
         }
-
-        // Check if room exists and has space
-        const currentUsers = getRoomUsers(roomCode);
-        if (currentUsers.size >= 2) {
-          return socket.emit('error', { message: 'Room is full (max 2 users)' });
-        }
-
-        // If already in a room, leave it first
-        const existingRoom = socketRoomMap.get(socket.id);
-        if (existingRoom && existingRoom !== roomCode) {
-          await cleanupSocket(socket.id);
-        }
-
-        // Join the Socket.io room
+        const r = roomState.get(roomCode);
+        r[role].socketId = socket.id;
+        socketMeta.set(socket.id, { roomCode, role });
         socket.join(roomCode);
-        socketRoomMap.set(socket.id, roomCode);
-
-        if (!roomSocketsMap.has(roomCode)) {
-          roomSocketsMap.set(roomCode, new Set());
-        }
-        roomSocketsMap.get(roomCode).add(socket.id);
-
-        const userCount = getRoomUserCount(roomCode);
-        const isHost = userCount === 1;
-
-        // Update DB
+        const userCount = getActiveCount(roomCode);
         if (isMongoConnected()) {
-          try {
-            await Room.findOneAndUpdate(
-              { code: roomCode },
-              {
-                $push: { users: { socketId: socket.id } },
-                lastActivity: new Date(),
-              }
-            );
-          } catch (e) { /* ignore */ }
+          try { await Room.findOneAndUpdate({ code: roomCode }, { $push: { users: { socketId: socket.id } }, lastActivity: new Date() }); } catch (_) {}
         }
-
-        // Send room-joined to the joining user
-        socket.emit('room-joined', {
-          roomCode,
-          socketId: socket.id,
-          isHost,
-          userCount,
-          timestamp: Date.now(),
-        });
-
-        // Notify other user
-        socket.to(roomCode).emit('user-joined', {
-          socketId: socket.id,
-          userCount,
-          timestamp: Date.now(),
-        });
-
-        resetInactivityTimer(socket.id);
-        console.log(`👥 ${socket.id} joined room ${roomCode} (${userCount}/2)`);
+        socket.emit('room-joined', { roomCode, socketId: socket.id, role, isHost: role === 'host', userCount, timestamp: Date.now() });
+        const other = getOtherSocket(roomCode, socket.id);
+        if (other) io.to(other).emit('user-joined', { socketId: socket.id, role, userCount, timestamp: Date.now() });
+        resetIdle(socket.id);
       } catch (err) {
-        console.error('join-room error:', err);
         socket.emit('error', { message: 'Failed to join room' });
       }
     });
 
-    socket.on('leave-room', async () => {
-      await cleanupSocket(socket.id);
-    });
-
-    // ─── PLAYBACK SYNC EVENTS ───────────────────────────────
+    socket.on('leave-room', async () => { await cleanupSocket(socket.id); });
 
     socket.on('playback-play', ({ roomCode, currentTime, timestamp }) => {
-      resetInactivityTimer(socket.id);
-      socket.to(roomCode).emit('playback-play', {
-        currentTime,
-        timestamp: timestamp || Date.now(),
-        fromSocketId: socket.id,
-      });
+      resetIdle(socket.id);
+      socket.to(roomCode).emit('playback-play', { currentTime, timestamp: timestamp || Date.now(), fromSocketId: socket.id });
     });
-
     socket.on('playback-pause', ({ roomCode, currentTime, timestamp }) => {
-      resetInactivityTimer(socket.id);
-      socket.to(roomCode).emit('playback-pause', {
-        currentTime,
-        timestamp: timestamp || Date.now(),
-        fromSocketId: socket.id,
-      });
+      resetIdle(socket.id);
+      socket.to(roomCode).emit('playback-pause', { currentTime, timestamp: timestamp || Date.now(), fromSocketId: socket.id });
     });
-
     socket.on('playback-seek', ({ roomCode, currentTime, timestamp }) => {
-      resetInactivityTimer(socket.id);
-      socket.to(roomCode).emit('playback-seek', {
-        currentTime,
-        timestamp: timestamp || Date.now(),
-        fromSocketId: socket.id,
-      });
+      resetIdle(socket.id);
+      socket.to(roomCode).emit('playback-seek', { currentTime, timestamp: timestamp || Date.now(), fromSocketId: socket.id });
     });
-
     socket.on('playback-stop', ({ roomCode }) => {
-      resetInactivityTimer(socket.id);
-      socket.to(roomCode).emit('playback-stop', {
-        fromSocketId: socket.id,
-        timestamp: Date.now(),
-      });
+      resetIdle(socket.id);
+      socket.to(roomCode).emit('playback-stop', { fromSocketId: socket.id, timestamp: Date.now() });
     });
-
     socket.on('playback-speed', ({ roomCode, speed }) => {
-      resetInactivityTimer(socket.id);
+      resetIdle(socket.id);
       socket.to(roomCode).emit('playback-speed', { speed, fromSocketId: socket.id });
     });
-
-    // Sync state request: new joiner asks for current playback state
     socket.on('request-sync', ({ roomCode }) => {
-      const otherUser = getOtherUser(roomCode, socket.id);
-      if (otherUser) {
-        io.to(otherUser).emit('sync-state-request', {
-          fromSocketId: socket.id,
-          timestamp: Date.now(),
-        });
-      } else {
-        socket.emit('sync-state-response', { hasMedia: false });
-      }
+      const other = getOtherSocket(roomCode, socket.id);
+      if (other) io.to(other).emit('sync-state-request', { fromSocketId: socket.id, timestamp: Date.now() });
+      else socket.emit('sync-state-response', { hasMedia: false });
     });
-
-    // Response to sync request
-    socket.on('sync-state-response', ({ toSocketId, state }) => {
-      io.to(toSocketId).emit('sync-state-response', state);
-    });
-
-    // ─── MEDIA EVENTS ────────────────────────────────────────
-
+    socket.on('sync-state-response', ({ toSocketId, state }) => { io.to(toSocketId).emit('sync-state-response', state); });
     socket.on('media-loaded', ({ roomCode, mediaName, mediaType, duration }) => {
-      resetInactivityTimer(socket.id);
-      socket.to(roomCode).emit('media-loaded', {
-        mediaName,
-        mediaType,
-        duration,
-        fromSocketId: socket.id,
-        timestamp: Date.now(),
-      });
+      resetIdle(socket.id);
+      socket.to(roomCode).emit('media-loaded', { mediaName, mediaType, duration, fromSocketId: socket.id, timestamp: Date.now() });
     });
-
     socket.on('media-buffering', ({ roomCode, buffering }) => {
-      socket.to(roomCode).emit('media-buffering', {
-        buffering,
-        fromSocketId: socket.id,
-      });
+      socket.to(roomCode).emit('media-buffering', { buffering, fromSocketId: socket.id });
     });
-
-    // ─── CHAT EVENTS ─────────────────────────────────────────
-
     socket.on('chat-message', ({ roomCode, message, timestamp }) => {
-      resetInactivityTimer(socket.id);
-      if (!message || message.trim().length === 0) return;
-      if (message.length > 500) return; // Limit message length
-
-      const chatData = {
-        id: `${socket.id}-${Date.now()}`,
-        message: message.trim(),
-        fromSocketId: socket.id,
-        timestamp: timestamp || Date.now(),
-      };
-
-      // Send to everyone in room including sender
-      io.to(roomCode).emit('chat-message', chatData);
+      resetIdle(socket.id);
+      if (!message?.trim() || message.length > 500) return;
+      const meta = socketMeta.get(socket.id);
+      io.to(roomCode).emit('chat-message', { id: `${socket.id}-${Date.now()}`, message: message.trim(), fromSocketId: socket.id, role: meta?.role || 'unknown', timestamp: timestamp || Date.now() });
     });
-
-    // ─── WEBRTC SIGNALING ────────────────────────────────────
-
-    socket.on('webrtc-offer', ({ roomCode, offer, targetSocketId }) => {
-      const target = targetSocketId || getOtherUser(roomCode, socket.id);
-      if (target) {
-        io.to(target).emit('webrtc-offer', {
-          offer,
-          fromSocketId: socket.id,
-        });
-      }
+    socket.on('webrtc-offer', ({ roomCode, offer }) => {
+      const t = getOtherSocket(roomCode, socket.id);
+      if (t) io.to(t).emit('webrtc-offer', { offer, fromSocketId: socket.id });
     });
-
-    socket.on('webrtc-answer', ({ roomCode, answer, targetSocketId }) => {
-      const target = targetSocketId || getOtherUser(roomCode, socket.id);
-      if (target) {
-        io.to(target).emit('webrtc-answer', {
-          answer,
-          fromSocketId: socket.id,
-        });
-      }
+    socket.on('webrtc-answer', ({ roomCode, answer }) => {
+      const t = getOtherSocket(roomCode, socket.id);
+      if (t) io.to(t).emit('webrtc-answer', { answer, fromSocketId: socket.id });
     });
-
-    socket.on('webrtc-ice-candidate', ({ roomCode, candidate, targetSocketId }) => {
-      const target = targetSocketId || getOtherUser(roomCode, socket.id);
-      if (target) {
-        io.to(target).emit('webrtc-ice-candidate', {
-          candidate,
-          fromSocketId: socket.id,
-        });
-      }
+    socket.on('webrtc-ice-candidate', ({ roomCode, candidate }) => {
+      const t = getOtherSocket(roomCode, socket.id);
+      if (t) io.to(t).emit('webrtc-ice-candidate', { candidate, fromSocketId: socket.id });
     });
-
-    socket.on('webrtc-call-ended', ({ roomCode }) => {
-      socket.to(roomCode).emit('webrtc-call-ended', {
-        fromSocketId: socket.id,
-      });
-    });
-
-    // ─── FILE STREAM SIGNALING (dedicated data-channel P2P) ─────────
-    // These mirror the WebRTC call signaling but for the file transfer
-    // peer connection which carries only a data channel (no audio/video).
-
+    socket.on('webrtc-call-ended', ({ roomCode }) => { socket.to(roomCode).emit('webrtc-call-ended', { fromSocketId: socket.id }); });
     socket.on('file-rtc-offer', ({ roomCode, offer }) => {
-      const target = getOtherUser(roomCode, socket.id);
-      if (target) {
-        io.to(target).emit('file-rtc-offer', { offer, fromSocketId: socket.id });
-      }
+      const t = getOtherSocket(roomCode, socket.id);
+      if (t) io.to(t).emit('file-rtc-offer', { offer, fromSocketId: socket.id });
     });
-
     socket.on('file-rtc-answer', ({ roomCode, answer }) => {
-      const target = getOtherUser(roomCode, socket.id);
-      if (target) {
-        io.to(target).emit('file-rtc-answer', { answer, fromSocketId: socket.id });
-      }
+      const t = getOtherSocket(roomCode, socket.id);
+      if (t) io.to(t).emit('file-rtc-answer', { answer, fromSocketId: socket.id });
     });
-
     socket.on('file-rtc-ice', ({ roomCode, candidate, role }) => {
-      const target = getOtherUser(roomCode, socket.id);
-      if (target) {
-        io.to(target).emit('file-rtc-ice', { candidate, role, fromSocketId: socket.id });
-      }
+      const t = getOtherSocket(roomCode, socket.id);
+      if (t) io.to(t).emit('file-rtc-ice', { candidate, role, fromSocketId: socket.id });
     });
-
-    // Notify partner that host has a file available for streaming
     socket.on('file-stream-available', ({ roomCode, fileName, fileSize, fileType }) => {
-      socket.to(roomCode).emit('file-stream-available', {
-        fileName,
-        fileSize,
-        fileType,
-        fromSocketId: socket.id,
-      });
+      socket.to(roomCode).emit('file-stream-available', { fileName, fileSize, fileType, fromSocketId: socket.id });
     });
-
-    // ─── PING / LATENCY ──────────────────────────────────────
-
-    socket.on('ping', ({ timestamp }) => {
-      socket.emit('pong', { timestamp, serverTimestamp: Date.now() });
-    });
-
-    // ─── DISCONNECT ──────────────────────────────────────────
-
-    socket.on('disconnect', async (reason) => {
-      console.log(`🔌 Client disconnected: ${socket.id} (${reason})`);
-      await cleanupSocket(socket.id);
-    });
-
-    socket.on('error', (err) => {
-      console.error(`Socket error for ${socket.id}:`, err);
-    });
+    socket.on('ping', ({ timestamp }) => { socket.emit('pong', { timestamp, serverTimestamp: Date.now() }); });
+    socket.on('disconnect', async (reason) => { await cleanupSocket(socket.id); });
+    socket.on('error', (err) => console.error('Socket error:', err));
   });
 
-  // Periodic cleanup: remove stale in-memory rooms every 5 minutes
   setInterval(() => {
     const now = Date.now();
-    for (const [code, room] of inMemoryRooms) {
-      const age = now - new Date(room.createdAt).getTime();
-      if (age > 86400000 && !roomSocketsMap.has(code)) { // > 24h and no active sockets
-        inMemoryRooms.delete(code);
+    for (const [code, room] of roomState) {
+      if (!room.host.socketId && !room.partner.socketId && now - room.createdAt > 86400000) {
+        roomState.delete(code); inMemoryRooms.delete(code);
       }
     }
   }, 5 * 60 * 1000);
