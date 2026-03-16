@@ -62,33 +62,19 @@ exports.checkRoom = async (req, res) => {
       if (!room) {
         return res.status(404).json({ success: false, message: 'Room not found' });
       }
-      if (room.isFull()) {
-        return res.status(403).json({ success: false, message: 'Room is full (max 2 users)' });
-      }
+      // Don't check user count here — socket handler enforces 2-user limit
       return res.json({
         success: true,
-        room: {
-          code: room.code,
-          userCount: room.users.length,
-          playbackState: room.playbackState,
-        },
+        room: { code: room.code },
       });
     } else {
-      // In-memory fallback
       const room = inMemoryRooms.get(code);
       if (!room) {
         return res.status(404).json({ success: false, message: 'Room not found' });
       }
-      if (room.users.length >= 2) {
-        return res.status(403).json({ success: false, message: 'Room is full (max 2 users)' });
-      }
       return res.json({
         success: true,
-        room: {
-          code: room.code,
-          userCount: room.users.length,
-          playbackState: room.playbackState,
-        },
+        room: { code: room.code },
       });
     }
   } catch (err) {
