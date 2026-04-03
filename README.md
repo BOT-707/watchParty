@@ -2,6 +2,8 @@
 
 A full-stack real-time watch party application built with **Next.js**, **Node.js/Express**, **Socket.io**, **WebRTC**, and **MongoDB**. Watch any local media file in perfect sync with a remote partner — complete with P2P video/audio calls and live text chat.
 
+"https://watch-party-mocha.vercel.app/"
+
 ---
 
 ## ✨ Features
